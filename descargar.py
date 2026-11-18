@@ -1,37 +1,37 @@
 import os
 import re
 from urllib.parse import urljoin
-from playwright.sync_api import sync_playwright
+import requests
+from bs4 import BeautifulSoup
 
 URL = "https://ups.com"
 CARPETA_DESTINO = "descargas"
 os.makedirs(CARPETA_DESTINO, exist_ok=True)
 
-with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True)
-    context = browser.new_context(
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-    )
-    page = context.new_page()
-    page.goto(URL, wait_until="networkidle", timeout=60000)
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
-    enlace = page.locator("a", has_text=re.compile(r"View International Air Freight Capacity Surcharge\s*-", re.I)).first
-    href = enlace.get_attribute("href")
-    texto = enlace.inner_text().strip()
+resp = requests.get(URL, headers=headers, timeout=30)
+resp.raise_for_status()
 
-    if not href:
-        raise Exception("No se encontró el enlace del archivo.")
+soup = BeautifulSoup(resp.text, "html.parser")
+enlace = soup.find("a", string=re.compile(r"View International Air Freight Capacity Surcharge\s*-", re.I))
 
-    pdf_url = urljoin(URL, href)
-    nombre_limpio = re.sub(r"[^a-zA-Z0-9_-]", "_", texto) + ".pdf"
-    ruta_archivo = os.path.join(CARPETA_DESTINO, nombre_limpio)
+if not enlace or not enlace.get("href"):
+    raise Exception("No se encontró el enlace del PDF en la página.")
 
-    response = context.request.get(pdf_url)
-    if response.ok:
-        with open(ruta_archivo, "wb") as f:
-            f.write(response.body())
-        print(f"Descargado correctamente: {ruta_archivo}")
-    else:
-        raise Exception(f"Error al descargar el PDF. Código HTTP: {response.status}")
+pdf_url = urljoin(URL, enlace["href"])
+texto = enlace.get_text(strip=True)
+nombre_limpio = re.sub(r"[^a-zA-Z0-9_-]", "_", texto) + ".pdf"
+ruta_archivo = os.path.join(CARPETA_DESTINO, nombre_limpio)
 
-    browser.close()
+pdf_resp = requests.get(pdf_url, headers=headers, timeout=30)
+pdf_resp.raise_for_status()
+
+with open(ruta_archivo, "wb") as f:
+    f.write(pdf_resp.content)
+
+print(f"Descargado correctamente: {ruta_archivo}")
