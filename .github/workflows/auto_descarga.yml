@@ -40,21 +40,43 @@ jobs:
 
       - name: Enviar correo con PDF y Excel actualizados
         if: steps.descarga.outputs.enviar == 'true'
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: smtp.gmail.com
-          server_port: 465
-          secure: true
-          username: ${{ secrets.MAIL_USER }}
-          password: ${{ secrets.MAIL_PASS }}
-          subject: "Actualización UPS IAF Surcharge - ${{ steps.descarga.outputs.archivo_nombre }}"
-          to: monjoseignacio@gmail.com
-          from: "${{ secrets.MAIL_USER }}"
-          body: |
-            Se adjuntan el PDF descargado de UPS y el Excel procesado (hojas Matriz_Original y Tabla_Plana).
-          attachments: |
-            ${{ steps.descarga.outputs.archivo_path }}
-            ${{ steps.descarga.outputs.excel_path }}
+        env:
+          MAIL_USER: ${{ secrets.MAIL_USER }}
+          MAIL_PASS: ${{ secrets.MAIL_PASS }}
+          ARCHIVO_PDF: ${{ steps.descarga.outputs.archivo_path }}
+          ARCHIVO_XLSX: ${{ steps.descarga.outputs.excel_path }}
+          NOMBRE_ARCHIVO: ${{ steps.descarga.outputs.archivo_nombre }}
+        run: |
+          python - <<'EOF'
+          import mimetypes
+          import os
+          import smtplib
+          from email.message import EmailMessage
+
+          msg = EmailMessage()
+          msg["Subject"] = f"Actualización UPS IAF Surcharge - {os.environ['NOMBRE_ARCHIVO']}"
+          msg["From"] = os.environ["MAIL_USER"]
+          msg["To"] = "monjoseignacio@gmail.com"
+          msg.set_content("Se adjuntan el PDF descargado de UPS y el Excel procesado.")
+
+          for ruta in (os.environ["ARCHIVO_PDF"], os.environ["ARCHIVO_XLSX"]):
+              if ruta and os.path.exists(ruta):
+                  ctype, _ = mimetypes.guess_type(ruta)
+                  maintype, subtype = (ctype or "application/octet-stream").split("/", 1)
+                  with open(ruta, "rb") as f:
+                      msg.add_attachment(
+                          f.read(),
+                          maintype=maintype,
+                          subtype=subtype,
+                          filename=os.path.basename(ruta),
+                      )
+
+          with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as smtp:
+              smtp.login(os.environ["MAIL_USER"], os.environ["MAIL_PASS"].replace(" ", ""))
+              smtp.send_message(msg)
+
+          print("Correo enviado correctamente a monjoseignacio@gmail.com")
+          EOF
 
       - name: Guardar archivos nuevos en el repositorio
         if: steps.descarga.outputs.enviar == 'true'
