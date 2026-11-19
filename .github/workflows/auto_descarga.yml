@@ -40,7 +40,7 @@ jobs:
           username: ${{ secrets.MAIL_USER }}
           password: ${{ secrets.MAIL_PASS }}
           subject: "Actualización UPS IAF Surcharge - ${{ steps.descarga.outputs.archivo_nombre }}"
-          to: Jose.Mon@mirgor.com
+          to: monjoseignacio@gmail.com
           from: "Automatización UPS <${{ secrets.MAIL_USER }}>"
           body: |
             Se detectó una actualización en la tabla de IAF Surcharges de UPS.
