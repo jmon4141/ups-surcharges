@@ -1,164 +1,143 @@
-import hashlib
-import os
-import re
-from urllib.parse import urljoin, urlparse
+def pdf_a_excel(ruta_pdf: str, ruta_excel: str):
+    filas_tabla = []
 
-import pandas as pd
-import pdfplumber
-from playwright.sync_api import sync_playwright
-
-URL = "https://gffsolutions.ups.com/IAF-Surcharges.html"
-CARPETA_DESTINO = "descargas"
-ARCHIVO_HASH = os.path.join(CARPETA_DESTINO, "ultimo.sha256")
-os.makedirs(CARPETA_DESTINO, exist_ok=True)
-
-
-def limpiar_nombre(texto: str) -> str:
-    limpio = re.sub(r"[^a-zA-Z0-9_-]+", "_", texto).strip("_")
-    return limpio[:80] or "ups_iaf_surcharge"
-
-
-def calcular_sha256(datos: bytes) -> str:
-    return hashlib.sha256(datos).hexdigest()
-
-
-def escribir_output(clave: str, valor: str):
-    github_output = os.environ.get("GITHUB_OUTPUT")
-    if github_output:
-        with open(github_output, "a", encoding="utf-8") as f:
-            f.write(f"{clave}={valor}\n")
-
-
-def limpiar_celda(val) -> str:
-    if val is None:
-        return ""
-    return " ".join(str(val).replace("\n", " ").split())
-
-
-def parsear_valor(val: str):
-    if not val:
-        return None
-    limpio = val.replace("$", "").replace(",", ".").strip()
-    if limpio in ("-", "—", "N/A", "n/a"):
-        return 0.0
-    try:
-        return float(limpio)
-    except ValueError:
-        return val
-
-
-def _extraer_por_coordenadas(pdf) -> list[list[str]]:
-    filas_reconstruidas = []
-    for page in pdf.pages:
+    with pdfplumber.open(ruta_pdf) as pdf:
+        page = pdf.pages[0]
         palabras = page.extract_words(keep_blank_chars=False, use_text_flow=False)
         if not palabras:
-            continue
+            raise RuntimeError("El PDF no contiene texto extraíble.")
 
-        palabras_ordenadas = sorted(palabras, key=lambda w: (w["top"], w["x0"]))
-        lineas = []
-        for w in palabras_ordenadas:
-            if not lineas or abs(w["top"] - lineas[-1][-1]["top"]) > 4.0:
-                lineas.append([w])
-            else:
-                lineas[-1].append(w)
+        # 1. Ubicamos la fila de encabezados de destinos ("US", "PE", ..., "Effective Date")
+        # y la fila de "Origins" para fijar el límite superior y las coordenadas X de cada columna.
+        candidatos_header = [
+            w for w in palabras
+            if w["text"] in {"US", "PE", "Canada", "Europe", "APAC", "Effective"}
+        ]
+        if not candidatos_header:
+            raise RuntimeError("No se encontraron encabezados conocidos de la tabla en el PDF.")
 
-        for linea in lineas:
-            linea_sorted = sorted(linea, key=lambda w: w["x0"])
-            celdas = []
-            actual = [linea_sorted[0]["text"]]
-            prev_x1 = linea_sorted[0]["x1"]
-            for w in linea_sorted[1:]:
-                if (w["x0"] - prev_x1) > 14.0:
-                    celdas.append(" ".join(actual))
-                    actual = [w["text"]]
+        top_header_min = min(w["top"] for w in candidatos_header) - 6.0
+        top_header_max = max(w["bottom"] for w in candidatos_header) + 6.0
+
+        # Límite inferior: justo antes de las notas al pie ("* North China" o "Example Shipment")
+        notas = [
+            w for w in palabras
+            if w["text"].startswith(("*", "†", "§", "∞")) or w["text"] == "Example"
+        ]
+        bottom_limit = min((w["top"] for w in notas), default=page.height) - 4.0
+
+        # Recortamos la zona de la tabla para ignorar títulos superiores y notas inferiores
+        area_tabla = page.crop((0, top_header_min, page.width, bottom_limit))
+        tablas = area_tabla.extract_tables(
+            table_settings={
+                "vertical_strategy": "lines",
+                "horizontal_strategy": "lines",
+                "snap_tolerance": 4,
+                "join_tolerance": 4,
+            }
+        )
+
+        if tablas:
+            tabla_bruta = max(tablas, key=lambda t: len(t) * (len(t[0]) if t else 0))
+            for fila in tabla_bruta:
+                fila_limpia = [limpiar_celda(c) for c in fila]
+                if any(fila_limpia):
+                    filas_tabla.append(fila_limpia)
+        else:
+            # Respaldo por coordenadas dentro del recorte de la tabla
+            palabras_recorte = area_tabla.extract_words(keep_blank_chars=False, use_text_flow=False)
+            palabras_ordenadas = sorted(palabras_recorte, key=lambda w: (w["top"], w["x0"]))
+            lineas = []
+            for w in palabras_ordenadas:
+                if not lineas or abs(w["top"] - lineas[-1][-1]["top"]) > 4.0:
+                    lineas.append([w])
                 else:
-                    actual.append(w["text"])
-                prev_x1 = max(prev_x1, w["x1"])
-            celdas.append(" ".join(actual))
-            if len(celdas) >= 3:
-                filas_reconstruidas.append(celdas)
+                    lineas[-1].append(w)
 
-    return filas_reconstruidas
+            for linea in lineas:
+                linea_sorted = sorted(linea, key=lambda w: w["x0"])
+                celdas = []
+                actual = [linea_sorted[0]["text"]]
+                prev_x1 = linea_sorted[0]["x1"]
+                for w in linea_sorted[1:]:
+                    if (w["x0"] - prev_x1) > 10.0:
+                        celdas.append(" ".join(actual))
+                        actual = [w["text"]]
+                    else:
+                        actual.append(w["text"])
+                    prev_x1 = max(prev_x1, w["x1"])
+                celdas.append(" ".join(actual))
+                if len(celdas) >= 2:
+                    filas_tabla.append(celdas)
 
+    if len(filas_tabla) < 2:
+        raise RuntimeError("No se pudo reconstruir la tabla del recuadro.")
 
-def pdf_a_excel(ruta_pdf: str, ruta_excel: str):
-    tablas_extraidas = []
-    with pdfplumber.open(ruta_pdf) as pdf:
-        for page in pdf.pages:
-            tablas = page.extract_tables(
-                table_settings={
-                    "vertical_strategy": "lines",
-                    "horizontal_strategy": "lines",
-                    "snap_tolerance": 4,
-                    "join_tolerance": 4,
-                }
-            )
-            if not tablas:
-                tablas = page.extract_tables(
-                    table_settings={
-                        "vertical_strategy": "text",
-                        "horizontal_strategy": "text",
-                    }
-                )
-            if tablas:
-                tablas_extraidas.extend(tablas)
-
-        if not tablas_extraidas:
-            coord_rows = _extraer_por_coordenadas(pdf)
-            if coord_rows:
-                max_cols = max(len(r) for r in coord_rows)
-                tablas_extraidas.append([r + [""] * (max_cols - len(r)) for r in coord_rows])
-
-    if not tablas_extraidas:
-        with pdfplumber.open(ruta_pdf) as pdf:
-            texto_paginas = [
-                {"Pagina": i + 1, "Texto": p.extract_text() or ""}
-                for i, p in enumerate(pdf.pages)
-            ]
-        with pd.ExcelWriter(ruta_excel, engine="openpyxl") as writer:
-            pd.DataFrame(texto_paginas).to_excel(writer, sheet_name="Texto_Crudo", index=False)
-        return
-
-    tabla_principal = max(tablas_extraidas, key=lambda t: len(t) * (len(t[0]) if t else 0))
-
-    filas_limpias = []
-    for fila in tabla_principal:
-        fila_txt = [limpiar_celda(c) for c in fila]
-        if any(fila_txt):
-            filas_limpias.append(fila_txt)
-
+    # Buscamos la fila que contiene "Origins" o "US" como fila de encabezados
     idx_header = 0
-    for i, fila in enumerate(filas_limpias):
-        no_vacias = sum(1 for c in fila if c != "")
-        if no_vacias >= 4:
+    for i, fila in enumerate(filas_tabla):
+        texto_fila = " ".join(fila).lower()
+        if "origins" in texto_fila or ("us" in [c.lower() for c in fila] and "apac" in texto_fila):
             idx_header = i
             break
 
-    raw_headers = filas_limpias[idx_header]
+    raw_headers = filas_tabla[idx_header]
     headers = []
     for j, h in enumerate(raw_headers):
         if j == 0:
-            headers.append(h if h else "Origin")
+            headers.append("Origins")
         else:
-            headers.append(h if h else f"Dest_{j}")
+            headers.append(h if h else f"Col_{j}")
 
-    datos = []
-    for fila in filas_limpias[idx_header + 1 :]:
-        fila_ajustada = (fila + [""] * len(headers))[: len(headers)]
-        origen = fila_ajustada[0]
-        if not origen or origen.startswith(("*", "†", "§", "Note", "Example")):
+    # Evitamos nombres de columna duplicados si los hubiera
+    headers_unicos = []
+    vistos = {}
+    for h in headers:
+        if h in vistos:
+            vistos[h] += 1
+            headers_unicos.append(f"{h}_{vistos[h]}")
+        else:
+            vistos[h] = 1
+            headers_unicos.append(h)
+
+    filas_datos = []
+    for fila in filas_tabla[idx_header + 1 :]:
+        fila_ajustada = (fila + [""] * len(headers_unicos))[: len(headers_unicos)]
+        origen = fila_ajustada[0].strip()
+        if not origen or origen.lower() in {"origins", "destinations", "surcharge amount (usd per kilo)†"}:
             continue
-        valores = [origen] + [parsear_valor(v) for v in fila_ajustada[1:]]
-        datos.append(valores)
+        if origen.startswith(("*", "†", "§", "∞", "Example")):
+            break
 
-    df_matriz = pd.DataFrame(datos, columns=headers)
+        # En los valores de surcharge, si una celda trae dos montos pegados (ej. "$2.66 $2.66"), tomamos el primero
+        valores = [origen]
+        for idx_col, val in enumerate(fila_ajustada[1:], start=1):
+            col_nombre = headers_unicos[idx_col].lower()
+            if "effective" in col_nombre or "date" in col_nombre:
+                valores.append(val)
+            else:
+                primer_token = val.split()[0] if val else ""
+                valores.append(parsear_valor(primer_token))
+        filas_datos.append(valores)
+
+    df_matriz = pd.DataFrame(filas_datos, columns=headers_unicos)
+
+    # Excluimos Effective Date del unpivot de tarifas para que Surcharge_USD_kg sea numérico limpio
+    cols_tarifa = [
+        c for c in headers_unicos[1:]
+        if "effective" not in c.lower() and "date" not in c.lower()
+    ]
 
     df_plana = df_matriz.melt(
-        id_vars=[headers[0]],
+        id_vars=[headers_unicos[0]],
+        value_vars=cols_tarifa,
         var_name="Destination",
         value_name="Surcharge_USD_kg",
-    ).rename(columns={headers[0]: "Origin"})
-    df_plana = df_plana[df_plana["Surcharge_USD_kg"].notna() & (df_plana["Surcharge_USD_kg"] != "")]
+    ).rename(columns={headers_unicos[0]: "Origins"})
+
+    df_plana = df_plana[
+        df_plana["Surcharge_USD_kg"].notna() & (df_plana["Surcharge_USD_kg"] != "")
+    ]
 
     with pd.ExcelWriter(ruta_excel, engine="openpyxl") as writer:
         df_matriz.to_excel(writer, sheet_name="Matriz_Original", index=False)
@@ -170,93 +149,3 @@ def pdf_a_excel(ruta_pdf: str, ruta_excel: str):
             for col in ws.columns:
                 max_len = max((len(str(cell.value or "")) for cell in col), default=10)
                 ws.column_dimensions[col[0].column_letter].width = min(max_len + 3, 35)
-
-
-def main():
-    forzar = os.environ.get("FORZAR_ENVIO", "").strip().lower() == "true"
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-            ),
-            accept_downloads=True,
-        )
-        page = context.new_page()
-        page.set_default_timeout(30000)
-
-        page.goto(URL, wait_until="domcontentloaded")
-        page.wait_for_timeout(2000)
-
-        locator = page.locator("a[href]").filter(
-            has_text=re.compile(r"international air freight capacity surcharge|\biaf\b", re.I)
-        )
-        if locator.count() == 0:
-            locator = page.locator("a[href*='IAF'], a[href*='iaf'], a[href*='.pdf']")
-        if locator.count() == 0:
-            raise RuntimeError("No se encontró el enlace esperado en la página.")
-
-        target = locator.first
-        texto_enlace = " ".join((target.inner_text() or "").split())
-        href = target.get_attribute("href")
-        target_url = urljoin(URL, href)
-        nombre_base = limpiar_nombre(texto_enlace or urlparse(target_url).path)
-
-        try:
-            with page.expect_download(timeout=10000) as download_info:
-                target.click()
-            download = download_info.value
-            suggested = download.suggested_filename or f"{nombre_base}.pdf"
-            ext = os.path.splitext(suggested)[1] or ".pdf"
-            temp_path = download.path()
-            with open(temp_path, "rb") as f:
-                contenido = f.read()
-        except Exception:
-            resp = context.request.get(target_url)
-            if not resp.ok:
-                raise RuntimeError(f"Error al obtener el archivo ({resp.status}) desde {target_url}")
-            content_type = resp.headers.get("content-type", "").lower()
-            ext = os.path.splitext(urlparse(target_url).path)[1].lower()
-            if not ext:
-                ext = ".pdf" if "pdf" in content_type else ".html"
-            contenido = resp.body()
-
-        browser.close()
-
-    nuevo_hash = calcular_sha256(contenido)
-    hash_anterior = ""
-    if os.path.exists(ARCHIVO_HASH):
-        with open(ARCHIVO_HASH, "r", encoding="utf-8") as f:
-            hash_anterior = f.read().strip()
-
-    hubo_cambio = nuevo_hash != hash_anterior
-
-    if not hubo_cambio and not forzar:
-        print("El archivo no cambió desde la última revisión. No se envía correo.")
-        escribir_output("enviar", "false")
-        return
-
-    ruta_pdf = os.path.join(CARPETA_DESTINO, f"{nombre_base}{ext}")
-    ruta_excel = os.path.join(CARPETA_DESTINO, f"{nombre_base}.xlsx")
-
-    with open(ruta_pdf, "wb") as f:
-        f.write(contenido)
-
-    pdf_a_excel(ruta_pdf, ruta_excel)
-
-    with open(ARCHIVO_HASH, "w", encoding="utf-8") as f:
-        f.write(nuevo_hash)
-
-    motivo = "Cambio detectado" if hubo_cambio else "Envío forzado manualmente"
-    print(f"{motivo}. PDF: {ruta_pdf} | Excel: {ruta_excel}")
-    escribir_output("enviar", "true")
-    escribir_output("archivo_path", ruta_pdf)
-    escribir_output("excel_path", ruta_excel)
-    escribir_output("archivo_nombre", f"{nombre_base}{ext}")
-
-
-if __name__ == "__main__":
-    main()
