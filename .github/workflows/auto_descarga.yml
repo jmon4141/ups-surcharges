@@ -1,8 +1,8 @@
-name: Descargar UPS Surcharge
+name: Descargar y Notificar UPS Surcharge
 
 on:
   schedule:
-    - cron: '0 12 * * 1,4'
+    - cron: '0 12 * * 1-5'
   workflow_dispatch:
 
 permissions:
@@ -26,10 +26,29 @@ jobs:
           pip install playwright
           playwright install --with-deps chromium
 
-      - name: Ejecutar script de descarga
+      - name: Ejecutar script de descarga y verificar cambios
+        id: descarga
         run: python descargar.py
 
+      - name: Enviar correo con el archivo actualizado
+        if: steps.descarga.outputs.cambio == 'true'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.MAIL_USER }}
+          password: ${{ secrets.MAIL_PASS }}
+          subject: "Actualización UPS IAF Surcharge - ${{ steps.descarga.outputs.archivo_nombre }}"
+          to: Jose.Mon@mirgor.com
+          from: "Automatización UPS <${{ secrets.MAIL_USER }}>"
+          body: |
+            Se detectó una actualización en la tabla de IAF Surcharges de UPS.
+            Se adjunta el nuevo archivo descargado.
+          attachments: ${{ steps.descarga.outputs.archivo_path }}
+
       - name: Guardar archivo nuevo en el repositorio
+        if: steps.descarga.outputs.cambio == 'true'
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
