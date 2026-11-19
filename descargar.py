@@ -15,6 +15,86 @@ CARPETA_DESTINO = "descargas"
 ARCHIVO_HASH = os.path.join(CARPETA_DESTINO, "ultimo.sha256")
 os.makedirs(CARPETA_DESTINO, exist_ok=True)
 
+# Normalización de nombres de origen que el PDF suele partir por espaciado de fuente
+ORIGENES_CANONICOS = {
+    "northchina": "North China*",
+    "eastchina": "East China**",
+    "southchina": "South China***",
+    "hongkong": "Hong Kong",
+    "korea": "Korea",
+    "taiwan": "Taiwan",
+    "singapore": "Singapore",
+    "thailand": "Thailand",
+    "malaysia": "Malaysia",
+    "vietnamhochiminh": "Vietnam - Ho Chi Minh",
+    "vietnamhanoi": "Vietnam - Hanoi",
+    "philippines": "Philippines",
+    "cambodia": "Cambodia",
+    "myanmar": "Myanmar",
+    "newzealand": "New Zealand",
+    "indonesia": "Indonesia",
+    "australia": "Australia",
+    "unitedstates": "United States",
+    "canada": "Canada",
+    "unitedkingdomireland": "United Kingdom, Ireland",
+    "germanyitalyturkey": "Germany, Italy, Turkey",
+    "restofeurope": "Rest of Europe",
+    "india": "India",
+    "bangladesh": "Bangladesh",
+    "egypt": "Egypt",
+    "southafrica": "South Africa",
+    "africaexceptforsouthafrica": "Africa (Except for South Africa)",
+}
+
+# Respaldo de códigos IATA de China según notas al pie del PDF de UPS
+CHINA_IATA_DEFAULT = {
+    "North China*": ["PEK", "DLC", "TAO", "SHE", "CGO", "TSN", "SIA"],
+    "East China**": ["CTU", "CKG", "HGH", "KUB", "NKG", "NGB", "SHA", "SZV", "WUX"],
+    "South China***": ["XMN", "FOC", "CAN", "SZX"],
+}
+
+# Mapeo de orígenes de UPS a códigos IATA
+ORIGEN_A_IATA = {
+    "Hong Kong": ["HKG"],
+    "Korea": ["ICN"],
+    "Taiwan": ["TPE"],
+    "Singapore": ["SIN"],
+    "Thailand": ["BKK"],
+    "Malaysia": ["KUL"],
+    "Vietnam - Ho Chi Minh": ["SGN"],
+    "Vietnam - Hanoi": ["HAN"],
+    "Philippines": ["MNL"],
+    "Cambodia": ["PNH"],
+    "Myanmar": ["RGN"],
+    "New Zealand": ["AKL"],
+    "Indonesia": ["CGK"],
+    "Australia": ["SYD", "MEL"],
+    "United States": ["LAX", "MIA"],
+    "Canada": ["YYZ", "YVR"],
+    "United Kingdom, Ireland": ["LHR", "DUB"],
+    "Germany, Italy, Turkey": ["FRA", "MXP"],  # Nota PDF: Excluye TR
+    "Rest of Europe": ["MAD", "AMS", "CDG"],
+    "India": ["DEL", "BOM"],
+    "Bangladesh": ["DAC"],
+    "Egypt": ["CAI"],
+    "South Africa": ["JNB"],
+    "Africa (Except for South Africa)": ["NBO", "LOS"],
+}
+
+# Mapeo de columnas de destino de UPS a tus aeropuertos IATA operativos
+DESTINO_A_IATA = {
+    "US": ["LAX", "MIA"],
+    "PE": ["LIM"],
+    "AR, BR, CL, PY, UY": ["ASU", "MVD", "SCL"],  # BUE tiene su propia columna dedicada
+    "Buenos Aires (BUE)": ["BUE"],
+    "Rest of Americas": ["BOG", "GUA", "GYE", "MGA", "PTY", "SAL", "SAP", "SRZ", "TGU", "UIO"],
+    "Canada": ["YYZ", "YVR"],
+    "India, Pakistan, Bangladesh": ["DEL", "BOM", "DAC"],
+    "Africa, South Africa": ["JNB", "CAI"],
+    "Europe": ["FRA", "MAD", "AMS", "LHR", "MXP"],
+    "APAC": ["HKG", "ICN", "TPE", "SIN", "BKK", "KUL", "SGN", "HAN", "MNL", "CGK", "SYD"],
+}
+
 
 def limpiar_nombre(texto: str) -> str:
     limpio = re.sub(r"[^a-zA-Z0-9_-]+", "_", texto).strip("_")
@@ -35,6 +115,11 @@ def parsear_monto(texto: str):
         return texto
 
 
+def normalizar_origen(texto: str) -> str:
+    clave = re.sub(r"[^a-zA-Z]", "", texto).lower()
+    return ORIGENES_CANONICOS.get(clave, texto.strip())
+
+
 def _agrupar_por_y(palabras: list[dict], tolerancia: float = 4.0) -> list[list[dict]]:
     if not palabras:
         return []
@@ -48,10 +133,60 @@ def _agrupar_por_y(palabras: list[dict], tolerancia: float = 4.0) -> list[list[d
     return filas
 
 
+def _extraer_iatas_china_notas(palabras_notas: list[dict]) -> dict[str, list[str]]:
+    """Lee dinámicamente los códigos IATA de North/East/South China desde las notas al pie."""
+    resultado = {k: list(v) for k, v in CHINA_IATA_DEFAULT.items()}
+    lineas = _agrupar_por_y(palabras_notas, tolerancia=4.0)
+    for linea in lineas:
+        txt = " ".join(w["text"] for w in sorted(linea, key=lambda x: x["x0"]))
+        codigos = re.findall(r"\b[A-Z]{3}\b", txt)
+        if not codigos:
+            continue
+        if "North China" in txt:
+            resultado["North China*"] = codigos
+        elif "East China" in txt:
+            resultado["East China**"] = codigos
+        elif "South China" in txt:
+            resultado["South China***"] = codigos
+    return resultado
+
+
+def _mapear_destino_iatas(col_destino: str) -> list[str]:
+    if col_destino in DESTINO_A_IATA:
+        return DESTINO_A_IATA[col_destino]
+    col_low = col_destino.lower()
+    if col_low == "us":
+        return DESTINO_A_IATA["US"]
+    if col_low == "pe":
+        return DESTINO_A_IATA["PE"]
+    if "bue" in col_low:
+        return DESTINO_A_IATA["Buenos Aires (BUE)"]
+    if "ar," in col_low or "py" in col_low or "uy" in col_low:
+        return DESTINO_A_IATA["AR, BR, CL, PY, UY"]
+    if "rest of americas" in col_low:
+        return DESTINO_A_IATA["Rest of Americas"]
+    if "canada" in col_low:
+        return DESTINO_A_IATA["Canada"]
+    if "india" in col_low:
+        return DESTINO_A_IATA["India, Pakistan, Bangladesh"]
+    if "africa" in col_low:
+        return DESTINO_A_IATA["Africa, South Africa"]
+    if "europe" in col_low:
+        return DESTINO_A_IATA["Europe"]
+    if "apac" in col_low:
+        return DESTINO_A_IATA["APAC"]
+    return [col_destino]
+
+
 def pdf_a_excel(ruta_pdf: str, ruta_excel: str):
     with pdfplumber.open(ruta_pdf) as pdf:
         page = pdf.pages[0]
-        palabras = page.extract_words(keep_blank_chars=False, use_text_flow=False)
+        palabras = page.extract_words(
+            keep_blank_chars=False,
+            use_text_flow=False,
+            x_tolerance=5,
+            y_tolerance=3,
+        )
 
     if not palabras:
         raise RuntimeError("El PDF no contiene texto seleccionable.")
@@ -79,6 +214,12 @@ def pdf_a_excel(ruta_pdf: str, ruta_excel: str):
         w for w in palabras
         if top_datos <= w["top"] <= bottom_datos
     ]
+    palabras_pie = [
+        w for w in palabras
+        if bottom_datos < w["top"] <= bottom_datos + 95.0
+    ]
+
+    china_iatas = _extraer_iatas_china_notas(palabras_pie)
 
     tokens_precio = [w for w in palabras_datos if w["text"].startswith("$")]
     if not tokens_precio:
@@ -136,9 +277,10 @@ def pdf_a_excel(ruta_pdf: str, ruta_excel: str):
         for w in fila_words:
             celdas[indice_columna(w)].append(w)
 
-        origen = " ".join(w["text"] for w in sorted(celdas[0], key=lambda x: x["x0"])).strip()
-        if not origen:
+        origen_raw = " ".join(w["text"] for w in sorted(celdas[0], key=lambda x: x["x0"])).strip()
+        if not origen_raw:
             continue
+        origen = normalizar_origen(origen_raw)
 
         fila_final = [origen]
         for col_idx in range(1, total_cols - 1):
@@ -160,13 +302,43 @@ def pdf_a_excel(ruta_pdf: str, ruta_excel: str):
     )
     df_plana = df_plana[df_plana["Surcharge_USD_kg"].notna()][
         ["Origins", "Destination", "Surcharge_USD_kg", "Effective Date"]
-    ]
+    ].reset_index(drop=True)
+
+    # Construcción de Tabla_IATA expandiendo China (notas al pie) y tus destinos IATA
+    mapa_origen_completo = {**china_iatas, **ORIGEN_A_IATA}
+    filas_iata = []
+    for _, row in df_plana.iterrows():
+        orig_ups = row["Origins"]
+        dest_ups = row["Destination"]
+        monto = row["Surcharge_USD_kg"]
+        eff_date = row["Effective Date"]
+
+        orig_iatas = mapa_origen_completo.get(orig_ups, [orig_ups])
+        dest_iatas = _mapear_destino_iatas(dest_ups)
+
+        for o_iata in orig_iatas:
+            for d_iata in dest_iatas:
+                filas_iata.append(
+                    {
+                        "Origin_IATA": o_iata,
+                        "Destination_IATA": d_iata,
+                        "Surcharge_USD_kg": monto,
+                        "Effective_Date": eff_date,
+                        "Origin_UPS": orig_ups,
+                        "Destination_UPS": dest_ups,
+                    }
+                )
+
+    df_iata = pd.DataFrame(filas_iata).drop_duplicates(
+        subset=["Origin_IATA", "Destination_IATA", "Origin_UPS", "Destination_UPS"]
+    )
 
     with pd.ExcelWriter(ruta_excel, engine="openpyxl") as writer:
-        df_matriz.to_excel(writer, sheet_name="Matriz_Original", index=False)
+        df_iata.to_excel(writer, sheet_name="Tabla_IATA", index=False)
         df_plana.to_excel(writer, sheet_name="Tabla_Plana", index=False)
+        df_matriz.to_excel(writer, sheet_name="Matriz_Original", index=False)
 
-        for sheet_name in ("Matriz_Original", "Tabla_Plana"):
+        for sheet_name in ("Tabla_IATA", "Tabla_Plana", "Matriz_Original"):
             ws = writer.sheets[sheet_name]
             ws.freeze_panes = "B2" if sheet_name == "Matriz_Original" else "A2"
             for col in ws.columns:
@@ -187,8 +359,8 @@ def enviar_correo(ruta_pdf: str, ruta_excel: str, nombre_base: str):
     msg["From"] = mail_user
     msg["To"] = destinatario
     msg.set_content(
-        "Se adjuntan el PDF original de UPS y el Excel procesado con la tabla de Surcharges "
-        "(hojas Matriz_Original y Tabla_Plana)."
+        "Se adjuntan el PDF original de UPS y el Excel procesado con códigos IATA "
+        "(hojas Tabla_IATA, Tabla_Plana y Matriz_Original)."
     )
 
     for ruta in (ruta_pdf, ruta_excel):
