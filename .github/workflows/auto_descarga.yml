@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: '0 12 * * 1-5'
   workflow_dispatch:
+    inputs:
+      forzar_envio:
+        description: 'Forzar envío de correo y guardado aunque el archivo no haya cambiado'
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -28,10 +34,12 @@ jobs:
 
       - name: Ejecutar script de descarga y generar Excel
         id: descarga
+        env:
+          FORZAR_ENVIO: ${{ inputs.forzar_envio }}
         run: python descargar.py
 
       - name: Enviar correo con PDF y Excel actualizados
-        if: steps.descarga.outputs.cambio == 'true'
+        if: steps.descarga.outputs.enviar == 'true'
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
@@ -41,16 +49,15 @@ jobs:
           password: ${{ secrets.MAIL_PASS }}
           subject: "Actualización UPS IAF Surcharge - ${{ steps.descarga.outputs.archivo_nombre }}"
           to: monjoseignacio@gmail.com
-          from: "Automatización UPS <${{ secrets.MAIL_USER }}>"
+          from: "${{ secrets.MAIL_USER }}"
           body: |
-            Se detectó una actualización en la tabla de IAF Surcharges de UPS.
-            Se adjuntan el PDF original y el Excel procesado (hojas Matriz_Original y Tabla_Plana).
+            Se adjuntan el PDF descargado de UPS y el Excel procesado (hojas Matriz_Original y Tabla_Plana).
           attachments: |
             ${{ steps.descarga.outputs.archivo_path }}
             ${{ steps.descarga.outputs.excel_path }}
 
       - name: Guardar archivos nuevos en el repositorio
-        if: steps.descarga.outputs.cambio == 'true'
+        if: steps.descarga.outputs.enviar == 'true'
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
