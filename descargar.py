@@ -1,12 +1,59 @@
+import hashlib
+import os
+import re
+from urllib.parse import urljoin, urlparse
+
+import pandas as pd
+import pdfplumber
+from playwright.sync_api import sync_playwright
+
+URL = "https://gffsolutions.ups.com/IAF-Surcharges.html"
+CARPETA_DESTINO = "descargas"
+ARCHIVO_HASH = os.path.join(CARPETA_DESTINO, "ultimo.sha256")
+os.makedirs(CARPETA_DESTINO, exist_ok=True)
+
+
+def limpiar_nombre(texto: str) -> str:
+    limpio = re.sub(r"[^a-zA-Z0-9_-]+", "_", texto).strip("_")
+    return limpio[:80] or "ups_iaf_surcharge"
+
+
+def calcular_sha256(datos: bytes) -> str:
+    return hashlib.sha256(datos).hexdigest()
+
+
+def escribir_output(clave: str, valor: str):
+    github_output = os.environ.get("GITHUB_OUTPUT")
+    if github_output:
+        with open(github_output, "a", encoding="utf-8") as f:
+            f.write(f"{clave}={valor}\n")
+
+
+def limpiar_celda(val) -> str:
+    if val is None:
+        return ""
+    return " ".join(str(val).replace("\n", " ").split())
+
+
+def parsear_valor(val: str):
+    if not val:
+        return None
+    limpio = val.replace("$", "").replace(",", ".").strip()
+    if limpio in ("-", "—", "N/A", "n/a"):
+        return 0.0
+    try:
+        return float(limpio)
+    except ValueError:
+        return val
+
+
 def _extraer_por_coordenadas(pdf) -> list[list[str]]:
-    """Reconstruye filas y columnas aproximadas usando coordenadas (x0, top) de las palabras."""
     filas_reconstruidas = []
     for page in pdf.pages:
         palabras = page.extract_words(keep_blank_chars=False, use_text_flow=False)
         if not palabras:
             continue
 
-        # Agrupamos palabras que están en la misma línea horizontal (tolerancia de 4 pt en 'top')
         palabras_ordenadas = sorted(palabras, key=lambda w: (w["top"], w["x0"]))
         lineas = []
         for w in palabras_ordenadas:
@@ -17,7 +64,6 @@ def _extraer_por_coordenadas(pdf) -> list[list[str]]:
 
         for linea in lineas:
             linea_sorted = sorted(linea, key=lambda w: w["x0"])
-            # Agrupamos palabras cercanas en X dentro de una misma celda (separación > 14 pt = nueva columna)
             celdas = []
             actual = [linea_sorted[0]["text"]]
             prev_x1 = linea_sorted[0]["x1"]
@@ -64,7 +110,6 @@ def pdf_a_excel(ruta_pdf: str, ruta_excel: str):
                 tablas_extraidas.append([r + [""] * (max_cols - len(r)) for r in coord_rows])
 
     if not tablas_extraidas:
-        # Fallback: guardamos al menos el texto crudo para no abortar la notificación
         with pdfplumber.open(ruta_pdf) as pdf:
             texto_paginas = [
                 {"Pagina": i + 1, "Texto": p.extract_text() or ""}
@@ -125,3 +170,93 @@ def pdf_a_excel(ruta_pdf: str, ruta_excel: str):
             for col in ws.columns:
                 max_len = max((len(str(cell.value or "")) for cell in col), default=10)
                 ws.column_dimensions[col[0].column_letter].width = min(max_len + 3, 35)
+
+
+def main():
+    forzar = os.environ.get("FORZAR_ENVIO", "").strip().lower() == "true"
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+            accept_downloads=True,
+        )
+        page = context.new_page()
+        page.set_default_timeout(30000)
+
+        page.goto(URL, wait_until="domcontentloaded")
+        page.wait_for_timeout(2000)
+
+        locator = page.locator("a[href]").filter(
+            has_text=re.compile(r"international air freight capacity surcharge|\biaf\b", re.I)
+        )
+        if locator.count() == 0:
+            locator = page.locator("a[href*='IAF'], a[href*='iaf'], a[href*='.pdf']")
+        if locator.count() == 0:
+            raise RuntimeError("No se encontró el enlace esperado en la página.")
+
+        target = locator.first
+        texto_enlace = " ".join((target.inner_text() or "").split())
+        href = target.get_attribute("href")
+        target_url = urljoin(URL, href)
+        nombre_base = limpiar_nombre(texto_enlace or urlparse(target_url).path)
+
+        try:
+            with page.expect_download(timeout=10000) as download_info:
+                target.click()
+            download = download_info.value
+            suggested = download.suggested_filename or f"{nombre_base}.pdf"
+            ext = os.path.splitext(suggested)[1] or ".pdf"
+            temp_path = download.path()
+            with open(temp_path, "rb") as f:
+                contenido = f.read()
+        except Exception:
+            resp = context.request.get(target_url)
+            if not resp.ok:
+                raise RuntimeError(f"Error al obtener el archivo ({resp.status}) desde {target_url}")
+            content_type = resp.headers.get("content-type", "").lower()
+            ext = os.path.splitext(urlparse(target_url).path)[1].lower()
+            if not ext:
+                ext = ".pdf" if "pdf" in content_type else ".html"
+            contenido = resp.body()
+
+        browser.close()
+
+    nuevo_hash = calcular_sha256(contenido)
+    hash_anterior = ""
+    if os.path.exists(ARCHIVO_HASH):
+        with open(ARCHIVO_HASH, "r", encoding="utf-8") as f:
+            hash_anterior = f.read().strip()
+
+    hubo_cambio = nuevo_hash != hash_anterior
+
+    if not hubo_cambio and not forzar:
+        print("El archivo no cambió desde la última revisión. No se envía correo.")
+        escribir_output("enviar", "false")
+        return
+
+    ruta_pdf = os.path.join(CARPETA_DESTINO, f"{nombre_base}{ext}")
+    ruta_excel = os.path.join(CARPETA_DESTINO, f"{nombre_base}.xlsx")
+
+    with open(ruta_pdf, "wb") as f:
+        f.write(contenido)
+
+    pdf_a_excel(ruta_pdf, ruta_excel)
+
+    with open(ARCHIVO_HASH, "w", encoding="utf-8") as f:
+        f.write(nuevo_hash)
+
+    motivo = "Cambio detectado" if hubo_cambio else "Envío forzado manualmente"
+    print(f"{motivo}. PDF: {ruta_pdf} | Excel: {ruta_excel}")
+    escribir_output("enviar", "true")
+    escribir_output("archivo_path", ruta_pdf)
+    escribir_output("excel_path", ruta_excel)
+    escribir_output("archivo_nombre", f"{nombre_base}{ext}")
+
+
+if __name__ == "__main__":
+    main()
