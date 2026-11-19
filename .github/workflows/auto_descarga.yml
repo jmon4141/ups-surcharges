@@ -24,7 +24,7 @@ jobs:
       - name: Instalar Playwright y Chromium
         run: |
           pip install playwright
-          playwright install chromium
+          playwright install --with-deps chromium
 
       - name: Ejecutar script de descarga
         run: python descargar.py
