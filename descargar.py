@@ -15,7 +15,6 @@ CARPETA_DESTINO = "descargas"
 ARCHIVO_HASH = os.path.join(CARPETA_DESTINO, "ultimo.sha256")
 os.makedirs(CARPETA_DESTINO, exist_ok=True)
 
-# Normalización de nombres de origen que el PDF suele partir por espaciado de fuente
 ORIGENES_CANONICOS = {
     "northchina": "North China*",
     "eastchina": "East China**",
@@ -46,14 +45,12 @@ ORIGENES_CANONICOS = {
     "africaexceptforsouthafrica": "Africa (Except for South Africa)",
 }
 
-# Respaldo de códigos IATA de China según notas al pie del PDF de UPS
 CHINA_IATA_DEFAULT = {
     "North China*": ["PEK", "DLC", "TAO", "SHE", "CGO", "TSN", "SIA"],
     "East China**": ["CTU", "CKG", "HGH", "KUB", "NKG", "NGB", "SHA", "SZV", "WUX"],
     "South China***": ["XMN", "FOC", "CAN", "SZX"],
 }
 
-# Mapeo de orígenes de UPS a códigos IATA
 ORIGEN_A_IATA = {
     "Hong Kong": ["HKG"],
     "Korea": ["ICN"],
@@ -69,10 +66,10 @@ ORIGEN_A_IATA = {
     "New Zealand": ["AKL"],
     "Indonesia": ["CGK"],
     "Australia": ["SYD", "MEL"],
-    "United States": ["LAX", "MIA"],
+    "United States": ["MIA"],
     "Canada": ["YYZ", "YVR"],
     "United Kingdom, Ireland": ["LHR", "DUB"],
-    "Germany, Italy, Turkey": ["FRA", "MXP"],  # Nota PDF: Excluye TR
+    "Germany, Italy, Turkey": ["FRA", "MXP"],
     "Rest of Europe": ["MAD", "AMS", "CDG"],
     "India": ["DEL", "BOM"],
     "Bangladesh": ["DAC"],
@@ -81,11 +78,10 @@ ORIGEN_A_IATA = {
     "Africa (Except for South Africa)": ["NBO", "LOS"],
 }
 
-# Mapeo de columnas de destino de UPS a tus aeropuertos IATA operativos
 DESTINO_A_IATA = {
-    "US": ["LAX", "MIA"],
+    "US": ["MIA"],
     "PE": ["LIM"],
-    "AR, BR, CL, PY, UY": ["ASU", "MVD", "SCL"],  # BUE tiene su propia columna dedicada
+    "AR, BR, CL, PY, UY": ["ASU", "MVD", "SCL"],
     "Buenos Aires (BUE)": ["BUE"],
     "Rest of Americas": ["BOG", "GUA", "GYE", "MGA", "PTY", "SAL", "SAP", "SRZ", "TGU", "UIO"],
     "Canada": ["YYZ", "YVR"],
@@ -134,7 +130,6 @@ def _agrupar_por_y(palabras: list[dict], tolerancia: float = 4.0) -> list[list[d
 
 
 def _extraer_iatas_china_notas(palabras_notas: list[dict]) -> dict[str, list[str]]:
-    """Lee dinámicamente los códigos IATA de North/East/South China desde las notas al pie."""
     resultado = {k: list(v) for k, v in CHINA_IATA_DEFAULT.items()}
     lineas = _agrupar_por_y(palabras_notas, tolerancia=4.0)
     for linea in lineas:
@@ -304,7 +299,6 @@ def pdf_a_excel(ruta_pdf: str, ruta_excel: str):
         ["Origins", "Destination", "Surcharge_USD_kg", "Effective Date"]
     ].reset_index(drop=True)
 
-    # Construcción de Tabla_IATA expandiendo China (notas al pie) y tus destinos IATA
     mapa_origen_completo = {**china_iatas, **ORIGEN_A_IATA}
     filas_iata = []
     for _, row in df_plana.iterrows():
