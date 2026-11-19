@@ -21,16 +21,16 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Instalar Playwright y Chromium
+      - name: Instalar dependencias
         run: |
-          pip install playwright
+          pip install playwright pdfplumber pandas openpyxl
           playwright install --with-deps chromium
 
-      - name: Ejecutar script de descarga y verificar cambios
+      - name: Ejecutar script de descarga y generar Excel
         id: descarga
         run: python descargar.py
 
-      - name: Enviar correo con el archivo actualizado
+      - name: Enviar correo con PDF y Excel actualizados
         if: steps.descarga.outputs.cambio == 'true'
         uses: dawidd6/action-send-mail@v3
         with:
@@ -44,14 +44,16 @@ jobs:
           from: "Automatización UPS <${{ secrets.MAIL_USER }}>"
           body: |
             Se detectó una actualización en la tabla de IAF Surcharges de UPS.
-            Se adjunta el nuevo archivo descargado.
-          attachments: ${{ steps.descarga.outputs.archivo_path }}
+            Se adjuntan el PDF original y el Excel procesado (hojas Matriz_Original y Tabla_Plana).
+          attachments: |
+            ${{ steps.descarga.outputs.archivo_path }}
+            ${{ steps.descarga.outputs.excel_path }}
 
-      - name: Guardar archivo nuevo en el repositorio
+      - name: Guardar archivos nuevos en el repositorio
         if: steps.descarga.outputs.cambio == 'true'
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add descargas/
-          git diff --staged --quiet || git commit -m "Actualización automática UPS Surcharge"
+          git diff --staged --quiet || git commit -m "Actualización automática UPS Surcharge (PDF + Excel)"
           git push
