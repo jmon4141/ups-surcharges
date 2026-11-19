@@ -30,7 +30,7 @@ jobs:
         env:
           MAIL_USER: ${{ secrets.MAIL_USER }}
           MAIL_PASS: ${{ secrets.MAIL_PASS }}
-          DESTINATARIO: monjoseignacio@gmail.com
+          DESTINATARIO: Jose.Mon@mirgor.com
         run: python descargar.py
 
       - name: Guardar archivos nuevos en el repositorio
