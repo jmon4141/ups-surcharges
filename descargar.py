@@ -56,7 +56,6 @@ def pdf_a_excel(ruta_pdf: str, ruta_excel: str):
     if not palabras:
         raise RuntimeError("El PDF no contiene texto seleccionable.")
 
-    # 1. Ubicamos inicio y fin vertical estricto de la tabla del recuadro
     origins_words = [w for w in palabras if w["text"] == "Origins"]
     north_words = [w for w in palabras if w["text"].startswith("North") and not w["text"].startswith("*")]
     notas_words = [
@@ -81,7 +80,6 @@ def pdf_a_excel(ruta_pdf: str, ruta_excel: str):
         if top_datos <= w["top"] <= bottom_datos
     ]
 
-    # 2. Detectamos los centros X exactos de las columnas de tarifas a partir de los valores "$X.XX"
     tokens_precio = [w for w in palabras_datos if w["text"].startswith("$")]
     if not tokens_precio:
         raise RuntimeError("No se encontraron montos en dólares dentro de la tabla.")
@@ -96,7 +94,6 @@ def pdf_a_excel(ruta_pdf: str, ruta_excel: str):
 
     centros_dest = [sum(c) / len(c) for c in clusters_x]
 
-    # Límites horizontales: Origins a la izquierda, 10 destinos al medio, Effective Date a la derecha
     limite_izq_dest = centros_dest[0] - 20.0
     limite_der_dest = centros_dest[-1] + 20.0
     cortes_dest = [
@@ -107,9 +104,9 @@ def pdf_a_excel(ruta_pdf: str, ruta_excel: str):
     def indice_columna(w: dict) -> int:
         xc = (w["x0"] + w["x1"]) / 2.0
         if xc < limite_izq_dest:
-            return 0  # Origins
+            return 0
         if xc > limite_der_dest:
-            return len(centros_dest) + 1  # Effective Date
+            return len(centros_dest) + 1
         for idx, corte in enumerate(cortes_dest):
             if xc < corte:
                 return idx + 1
@@ -117,7 +114,6 @@ def pdf_a_excel(ruta_pdf: str, ruta_excel: str):
 
     total_cols = len(centros_dest) + 2
 
-    # 3. Construimos los encabezados limpios de las 12 columnas
     buckets_header: list[list[dict]] = [[] for _ in range(total_cols)]
     for w in palabras_header:
         buckets_header[indice_columna(w)].append(w)
@@ -133,7 +129,6 @@ def pdf_a_excel(ruta_pdf: str, ruta_excel: str):
             nombre = " ".join(w["text"] for w in bucket_ord).strip()
             headers.append(nombre if nombre else f"Dest_{idx}")
 
-    # 4. Construimos las filas de datos alineadas columna por columna
     filas_agrupadas = _agrupar_por_y(palabras_datos, tolerancia=4.0)
     registros = []
     for fila_words in filas_agrupadas:
@@ -182,7 +177,7 @@ def pdf_a_excel(ruta_pdf: str, ruta_excel: str):
 def enviar_correo(ruta_pdf: str, ruta_excel: str, nombre_base: str):
     mail_user = os.environ.get("MAIL_USER", "").strip()
     mail_pass = os.environ.get("MAIL_PASS", "").replace(" ", "").strip()
-    destinatario = os.environ.get("DESTINATARIO", "monjoseignacio@gmail.com").strip()
+    destinatario = os.environ.get("DESTINATARIO", "Jose.Mon@mirgor.com").strip()
 
     if not mail_user or not mail_pass:
         raise RuntimeError("Faltan los secrets MAIL_USER o MAIL_PASS en GitHub Actions.")
@@ -215,8 +210,6 @@ def enviar_correo(ruta_pdf: str, ruta_excel: str, nombre_base: str):
 
 
 def main():
-    es_ejecucion_manual = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
-
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
@@ -273,10 +266,8 @@ def main():
         with open(ARCHIVO_HASH, "r", encoding="utf-8") as f:
             hash_anterior = f.read().strip()
 
-    hubo_cambio = nuevo_hash != hash_anterior
-
-    if not hubo_cambio and not es_ejecucion_manual:
-        print("El archivo no cambió desde la última revisión programada. No se envía correo.")
+    if nuevo_hash == hash_anterior:
+        print("El archivo no cambió desde la última revisión. No se envía correo.")
         return
 
     ruta_pdf = os.path.join(CARPETA_DESTINO, f"{nombre_base}{ext}")
