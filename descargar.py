@@ -8,6 +8,8 @@ from urllib.parse import urljoin, urlparse
 
 import pandas as pd
 import pdfplumber
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.table import Table, TableStyleInfo
 from playwright.sync_api import sync_playwright
 
 URL = "https://gffsolutions.ups.com/IAF-Surcharges.html"
@@ -82,7 +84,7 @@ DESTINO_A_IATA = {
     "US": ["MIA"],
     "PE": ["LIM"],
     "AR, BR, CL, PY, UY": ["ASU", "MVD", "SCL"],
-    "Buenos Aires (BUE)": ["BUE"],
+    "Buenos Aires (BUE)": ["EZE"],
     "Rest of Americas": ["BOG", "GUA", "GYE", "MGA", "PTY", "SAL", "SAP", "SRZ", "TGU", "UIO"],
     "Canada": ["YYZ", "YVR"],
     "India, Pakistan, Bangladesh": ["DEL", "BOM", "DAC"],
@@ -332,6 +334,19 @@ def pdf_a_excel(ruta_pdf: str, ruta_excel: str):
         df_plana.to_excel(writer, sheet_name="Tabla_Plana", index=False)
         df_matriz.to_excel(writer, sheet_name="Matriz_Original", index=False)
 
+        # Crea tabla formal de Excel en Tabla_IATA para lectura directa desde Power Automate
+        ws_iata = writer.sheets["Tabla_IATA"]
+        rango_iata = f"A1:{get_column_letter(len(df_iata.columns))}{max(len(df_iata) + 1, 2)}"
+        tabla_import = Table(displayName="tblImportacionUPS", ref=rango_iata)
+        tabla_import.tableStyleInfo = TableStyleInfo(
+            name="TableStyleMedium2",
+            showFirstColumn=False,
+            showLastColumn=False,
+            showRowStripes=True,
+            showColumnStripes=False,
+        )
+        ws_iata.add_table(tabla_import)
+
         for sheet_name in ("Tabla_IATA", "Tabla_Plana", "Matriz_Original"):
             ws = writer.sheets[sheet_name]
             ws.freeze_panes = "B2" if sheet_name == "Matriz_Original" else "A2"
@@ -354,7 +369,7 @@ def enviar_correo(ruta_pdf: str, ruta_excel: str, nombre_base: str):
     msg["To"] = destinatario
     msg.set_content(
         "Se adjuntan el PDF original de UPS y el Excel procesado con códigos IATA "
-        "(hojas Tabla_IATA, Tabla_Plana y Matriz_Original)."
+        "(hojas Tabla_IATA con tabla tblImportacionUPS, Tabla_Plana y Matriz_Original)."
     )
 
     for ruta in (ruta_pdf, ruta_excel):
